@@ -1,0 +1,7 @@
+services:
+  map:
+    build: .
+    image: offline-map-thailand
+    ports:
+      - "8080:80"
+    restart: unless-stopped

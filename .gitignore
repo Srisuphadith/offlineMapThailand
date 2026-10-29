@@ -1,0 +1,7 @@
+# ไฟล์ที่สร้างใหม่ได้ด้วย make (ใหญ่เกินจะเก็บใน git)
+data/
+web/thailand.pmtiles
+web/search-index.json
+
+__pycache__/
+.DS_Store

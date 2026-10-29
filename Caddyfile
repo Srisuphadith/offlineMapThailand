@@ -1,0 +1,9 @@
+:80 {
+	root * /srv
+
+	# บีบอัดเฉพาะไฟล์ข้อความ ห้ามบีบอัด .pmtiles เพราะ pmtiles.js อ่านแบบ Range request
+	@text path *.html *.js *.css *.json
+	encode @text gzip
+
+	file_server
+}

@@ -1,0 +1,6 @@
+# image ใช้แค่ web/ กับ Caddyfile ที่เหลือไม่ต้องส่งเข้า build context
+# (data/ มีไฟล์ OSM และไฟล์ชั่วคราวจาก Planetiler หลาย GB)
+*
+!web
+!Caddyfile
+**/.DS_Store

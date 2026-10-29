@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Offline Map</title>
+  <!-- ไฟล์ทั้งหมดอยู่ในเครื่อง ไม่ต้องใช้เน็ต -->
+  <link rel="stylesheet" href="lib/maplibre-gl.css">
+  <script src="lib/maplibre-gl.js"></script>
+  <script src="lib/pmtiles.js"></script>
+  <style>
+    html, body, #map { margin: 0; height: 100%; }
+
+    #search { position: absolute; top: 10px; left: 10px; z-index: 2;
+              width: min(360px, calc(100% - 70px)); font: 14px/1.4 sans-serif; }
+    #search input { box-sizing: border-box; width: 100%; padding: 9px 12px; font-size: 15px;
+                    border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+    #results { list-style: none; margin: 4px 0 0; padding: 0; background: #fff; border-radius: 6px;
+               box-shadow: 0 2px 8px rgba(0,0,0,.2); max-height: 60vh; overflow-y: auto; }
+    #results:empty { display: none; }
+    #results li { padding: 7px 12px; cursor: pointer; border-bottom: 1px solid #eee; }
+    #results li:last-child { border-bottom: 0; }
+    #results li.active, #results li:hover { background: #eef4fb; }
+    #results .sub { color: #777; font-size: 12px; }
+    #results .msg { color: #777; cursor: default; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="search">
+  <input id="q" type="search" placeholder="ค้นหาสถานที่ เช่น สยามพารากอน, ดอยอินทนนท์" autocomplete="off">
+  <ul id="results"></ul>
+</div>
+<script>
+  // ให้ MapLibre อ่าน URL แบบ pmtiles:// ได้
+  const protocol = new pmtiles.Protocol();
+  maplibregl.addProtocol("pmtiles", protocol.tile);
+
+  // ชื่อภาษาไทยก่อน ถ้าไม่มีใช้ชื่อปกติ
+  const nameTh = ["coalesce", ["get", "name:th"], ["get", "name"]];
+
+  const style = {
+    version: 8,
+    glyphs: "fonts/{fontstack}/{range}.pbf",   // font ต้องเก็บในเครื่องด้วย
+    sources: {
+      osm: {
+        type: "vector",
+        url: "pmtiles://thailand.pmtiles",
+        attribution: "© OpenStreetMap contributors"
+      }
+    },
+    layers: [
+      { id: "bg", type: "background", paint: { "background-color": "#f2efe9" } },
+
+      // ---------- พื้นที่ ----------
+      { id: "landcover", type: "fill", source: "osm", "source-layer": "landcover",
+        paint: { "fill-color": ["match", ["get", "class"],
+                   "wood", "#b9d8a5", "grass", "#d8e8c8", "farmland", "#eef0d5",
+                   "wetland", "#d3e5dc", "sand", "#f5e9c6", "rock", "#e0dcd6", "ice", "#ffffff",
+                   "#d8e8c8"],
+                 "fill-opacity": 0.6 } },
+
+      { id: "landuse", type: "fill", source: "osm", "source-layer": "landuse",
+        paint: { "fill-color": ["match", ["get", "class"],
+                   "residential", "#e8e0d8", "commercial", "#f2dad9", "retail", "#f2dad9",
+                   "industrial", "#ebdbe8", "railway", "#e5e0e8", "military", "#f0d8d0",
+                   ["school", "university", "college", "kindergarten"], "#f0e8c8",
+                   "hospital", "#f6dede", "cemetery", "#cde0c4", "stadium", "#d8edd0",
+                   "#e8e0d8"],
+                 "fill-opacity": 0.5 } },
+
+      { id: "park", type: "fill", source: "osm", "source-layer": "park",
+        paint: { "fill-color": "#c8e6b0", "fill-opacity": 0.5, "fill-outline-color": "#9cc68a" } },
+
+      { id: "water", type: "fill", source: "osm", "source-layer": "water",
+        paint: { "fill-color": "#aad3df" } },
+
+      { id: "waterway", type: "line", source: "osm", "source-layer": "waterway",
+        paint: { "line-color": "#aad3df",
+                 "line-width": ["interpolate", ["linear"], ["zoom"],
+                   8, ["match", ["get", "class"], "river", 1, 0.3],
+                   16, ["match", ["get", "class"], "river", 5, 2]] } },
+
+      // สนามบิน: พื้นที่เป็น polygon, รันเวย์/แท็กซี่เวย์เป็นเส้น
+      { id: "aeroway-area", type: "fill", source: "osm", "source-layer": "aeroway", minzoom: 10,
+        filter: ["==", ["geometry-type"], "Polygon"],
+        paint: { "fill-color": "#e4e1ee", "fill-opacity": 0.7 } },
+
+      { id: "aeroway-line", type: "line", source: "osm", "source-layer": "aeroway", minzoom: 10,
+        filter: ["==", ["geometry-type"], "LineString"],
+        paint: { "line-color": "#c8c4d6",
+                 "line-width": ["interpolate", ["linear"], ["zoom"],
+                   10, ["match", ["get", "class"], "runway", 1, 0.3],
+                   16, ["match", ["get", "class"], "runway", 30, 8]] } },
+
+      { id: "building", type: "fill", source: "osm", "source-layer": "building", minzoom: 14,
+        paint: { "fill-color": "#d9d0c9", "fill-outline-color": "#c4b6ab" } },
+
+      // ---------- ถนน/ราง ----------
+      // ถนนรอง: ไม่รวมถนนหลัก ทางเดิน ราง เรือ กระเช้า (แยกไปวาดเป็น layer ของตัวเอง)
+      { id: "road-minor", type: "line", source: "osm", "source-layer": "transportation",
+        filter: ["!", ["in", ["get", "class"], ["literal",
+          ["motorway", "trunk", "primary", "secondary", "path", "rail", "transit", "ferry", "aerialway"]]]],
+        paint: { "line-color": "#ffffff",
+                 "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.5, 18, 8] } },
+
+      { id: "path", type: "line", source: "osm", "source-layer": "transportation", minzoom: 14,
+        filter: ["==", ["get", "class"], "path"],
+        paint: { "line-color": "#c8a98a", "line-width": 1, "line-dasharray": [2, 1.5] } },
+
+      { id: "road-major", type: "line", source: "osm", "source-layer": "transportation",
+        filter: ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary", "secondary"]]],
+        paint: { "line-color": "#f6c26b",
+                 "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.8, 18, 14] } },
+
+      { id: "rail", type: "line", source: "osm", "source-layer": "transportation",
+        filter: ["in", ["get", "class"], ["literal", ["rail", "transit"]]],
+        paint: { "line-color": "#999999",
+                 "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.6, 18, 3] } },
+
+      { id: "ferry", type: "line", source: "osm", "source-layer": "transportation",
+        filter: ["==", ["get", "class"], "ferry"],
+        paint: { "line-color": "#6a9fc0", "line-width": 1, "line-dasharray": [4, 3] } },
+
+      { id: "aerialway", type: "line", source: "osm", "source-layer": "transportation", minzoom: 13,
+        filter: ["==", ["get", "class"], "aerialway"],
+        paint: { "line-color": "#666666", "line-width": 1 } },
+
+      // ---------- เขตแดน ----------
+      // เขตอำเภอ/ตำบล (admin_level 5-8) เส้นจาง แสดงเมื่อซูมเข้า
+      { id: "boundary-local", type: "line", source: "osm", "source-layer": "boundary", minzoom: 10,
+        filter: [">", ["get", "admin_level"], 4],
+        paint: { "line-color": "#c3c1cc", "line-width": 0.7, "line-dasharray": [2, 2] } },
+
+      { id: "boundary", type: "line", source: "osm", "source-layer": "boundary",
+        filter: ["all", ["<=", ["get", "admin_level"], 4], ["!=", ["get", "admin_level"], 2]],
+        paint: { "line-color": "#9e9cab", "line-dasharray": [3, 2] } },
+
+      { id: "boundary-country", type: "line", source: "osm", "source-layer": "boundary",
+        filter: ["==", ["get", "admin_level"], 2],
+        paint: { "line-color": "#8a7f9e", "line-width": ["interpolate", ["linear"], ["zoom"], 4, 1, 12, 3] } },
+
+      // ---------- ชื่อ/ตัวอักษร (layer ที่อยู่ล่างสุดจะได้วางก่อนเมื่อชนกัน) ----------
+      { id: "housenumber", type: "symbol", source: "osm", "source-layer": "housenumber", minzoom: 17,
+        layout: { "text-field": ["get", "housenumber"], "text-font": ["Noto Sans Regular"], "text-size": 10 },
+        paint: { "text-color": "#9b8f85" } },
+
+      { id: "waterway-label", type: "symbol", source: "osm", "source-layer": "waterway", minzoom: 13,
+        layout: { "symbol-placement": "line", "text-field": nameTh,
+                  "text-font": ["Noto Sans Regular"], "text-size": 11 },
+        paint: { "text-color": "#3f7fa3", "text-halo-color": "#fff", "text-halo-width": 1.2 } },
+
+      { id: "water-name-line", type: "symbol", source: "osm", "source-layer": "water_name",
+        filter: ["==", ["geometry-type"], "LineString"],
+        layout: { "symbol-placement": "line", "text-field": nameTh,
+                  "text-font": ["Noto Sans Regular"], "text-size": 12 },
+        paint: { "text-color": "#3f7fa3", "text-halo-color": "#fff", "text-halo-width": 1.2 } },
+
+      { id: "water-name-point", type: "symbol", source: "osm", "source-layer": "water_name",
+        filter: ["==", ["geometry-type"], "Point"],
+        layout: { "text-field": nameTh, "text-font": ["Noto Sans Regular"],
+                  "text-size": ["match", ["get", "class"], "ocean", 16, "sea", 14, 12] },
+        paint: { "text-color": "#3f7fa3", "text-halo-color": "#fff", "text-halo-width": 1.2 } },
+
+      { id: "road-label", type: "symbol", source: "osm", "source-layer": "transportation_name",
+        minzoom: 13,
+        layout: { "symbol-placement": "line", "text-field": nameTh,
+                  "text-font": ["Noto Sans Regular"], "text-size": 11 },
+        paint: { "text-color": "#555", "text-halo-color": "#fff", "text-halo-width": 1.2 } },
+
+      // POI ทุกประเภท (ไม่มี sprite ไอคอน จึงแสดงเป็นชื่ออย่างเดียว แยกสีตามประเภท)
+      // OpenMapTiles ใส่ POI ส่วนใหญ่ไว้ตั้งแต่ zoom 14, rank น้อย = สำคัญกว่า
+      { id: "poi-label", type: "symbol", source: "osm", "source-layer": "poi", minzoom: 14,
+        layout: { "text-field": nameTh, "text-font": ["Noto Sans Regular"],
+                  "text-size": ["match", ["get", "class"], "college", 12, 11],
+                  "text-max-width": 8,
+                  "symbol-sort-key": ["get", "rank"] },
+        paint: { "text-color": ["match", ["get", "class"],
+                   ["college", "school"], "#8a4b2a",
+                   "hospital", "#c0392b",
+                   "place_of_worship", "#7b4fa0",
+                   ["park", "campsite", "garden"], "#3f7d3a",
+                   ["restaurant", "fast_food", "cafe", "bar", "beer", "ice_cream"], "#b8661f",
+                   ["shop", "grocery", "clothing_store", "bakery", "alcohol_shop", "convenience"], "#9a6a2f",
+                   ["railway", "bus", "ferry_terminal", "aerialway"], "#3b6aa0",
+                   "#666666"],
+                 "text-halo-color": "#fff", "text-halo-width": 1.3 } },
+
+      { id: "mountain-peak", type: "symbol", source: "osm", "source-layer": "mountain_peak", minzoom: 9,
+        layout: { "text-field": ["case", ["has", "ele"],
+                    ["concat", "▲ ", nameTh, "\n", ["to-string", ["get", "ele"]], " ม."],
+                    ["concat", "▲ ", nameTh]],
+                  "text-font": ["Noto Sans Regular"], "text-size": 11,
+                  "symbol-sort-key": ["get", "rank"] },
+        paint: { "text-color": "#7a5c3e", "text-halo-color": "#fff", "text-halo-width": 1.3 } },
+
+      { id: "aerodrome-label", type: "symbol", source: "osm", "source-layer": "aerodrome_label", minzoom: 8,
+        layout: { "text-field": nameTh, "text-font": ["Noto Sans Regular"],
+                  "text-size": ["match", ["get", "class"], "international", 13, 11] },
+        paint: { "text-color": "#5d4f8c", "text-halo-color": "#fff", "text-halo-width": 1.5 } },
+
+      { id: "place-label", type: "symbol", source: "osm", "source-layer": "place",
+        layout: { "text-field": nameTh, "text-font": ["Noto Sans Regular"],
+                  "text-size": ["match", ["get", "class"], "city", 16, "town", 13, 11] },
+        paint: { "text-color": "#333", "text-halo-color": "#fff", "text-halo-width": 1.5 } }
+    ]
+  };
+
+  const map = new maplibregl.Map({
+    container: "map",
+    style,
+    center: [100.5018, 13.7563],  // กรุงเทพ
+    zoom: 10,
+    maxBounds: [[96.5, 4.5], [106.5, 21.5]]  // จำกัดให้อยู่ในประเทศไทย (มีข้อมูลแค่ส่วนนี้)
+  });
+  map.addControl(new maplibregl.NavigationControl());
+
+  // ---------- ค้นหาสถานที่ ----------
+  // search-index.json สร้างจาก tools/build_search_index.py
+  // { provinces: [...], items: [[ชื่อ, ชื่ออื่น, ประเภท, lon, lat, index จังหวัด หรือ -1], ...] }
+  const KIND_LABEL = {
+    "place:city": "เมือง", "place:town": "เมือง", "place:village": "หมู่บ้าน", "place:hamlet": "หมู่บ้าน",
+    "place:suburb": "ย่าน", "place:quarter": "ย่าน", "place:neighbourhood": "ชุมชน", "place:island": "เกาะ",
+    "poi:college": "มหาวิทยาลัย/วิทยาลัย", "poi:school": "โรงเรียน", "poi:hospital": "โรงพยาบาล",
+    "poi:place_of_worship": "ศาสนสถาน", "poi:shop": "ร้านค้า", "poi:restaurant": "ร้านอาหาร",
+    "poi:cafe": "คาเฟ่", "poi:lodging": "ที่พัก", "poi:railway": "สถานีรถไฟ", "poi:bus": "ป้ายรถเมล์",
+    "poi:park": "สวนสาธารณะ", "poi:attraction": "สถานที่ท่องเที่ยว",
+    road: "ถนน", water: "แหล่งน้ำ", peak: "ภูเขา", airport: "สนามบิน"
+  };
+  // ประเภทที่สำคัญกว่าขึ้นก่อน (ตัวเลขน้อย = ก่อน)
+  const KIND_RANK = { "place:city": 0, "place:town": 1, airport: 1, "place:island": 2, "place:suburb": 2,
+                      "place:village": 3, peak: 3, "poi:college": 3, water: 4, road: 6 };
+  // ซูมเมื่อเลือกผลลัพธ์ตามประเภท
+  const KIND_ZOOM = { "place:city": 12, "place:town": 13, airport: 13, "place:island": 12,
+                      peak: 14, water: 14, road: 16 };
+
+  const input = document.getElementById("q");
+  const list = document.getElementById("results");
+  let index = null, loading = null, shown = [], active = -1, marker = null, timer = null;
+
+  function loadIndex() {
+    loading = loading || fetch("search-index.json")
+      .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(data => {
+        index = data.items.map(r => ({ name: r[0], alt: r[1], kind: r[2], lon: r[3], lat: r[4],
+                                       province: data.provinces[r[5]] || "",
+                                       key: (r[0] + " " + r[1]).toLowerCase() }));
+      });
+    return loading;
+  }
+
+  function message(text) {
+    list.innerHTML = "";
+    const li = document.createElement("li");
+    li.className = "msg";
+    li.textContent = text;
+    list.appendChild(li);
+  }
+
+  function search(q) {
+    q = q.trim().toLowerCase();
+    if (!q) return [];
+    const hits = [];
+    for (const it of index) {
+      const pos = it.key.indexOf(q);
+      if (pos < 0) continue;
+      const exact = it.name.toLowerCase() === q || it.alt.toLowerCase() === q;
+      const match = exact ? 0 : pos === 0 ? 1 : 2;
+      const rank = KIND_RANK[it.kind] ?? (it.kind.startsWith("place:") ? 3 : 5);
+      hits.push({ it, score: match * 10 + rank });
+    }
+    hits.sort((a, b) => a.score - b.score || a.it.name.length - b.it.name.length);
+    // ถนนเส้นเดียวกันมีหลายจุด แสดงแค่ชื่อละ 1 รายการต่อจังหวัด
+    const out = [], roads = new Set();
+    for (const { it } of hits) {
+      if (it.kind === "road") {
+        const key = it.name + "|" + it.province;
+        if (roads.has(key)) continue;
+        roads.add(key);
+      }
+      out.push(it);
+      if (out.length >= 30) break;
+    }
+    return out;
+  }
+
+  function render() {
+    list.innerHTML = "";
+    if (!shown.length) return message("ไม่พบสถานที่");
+    shown.forEach((it, i) => {
+      const li = document.createElement("li");
+      if (i === active) li.className = "active";
+      const name = document.createElement("div");
+      name.textContent = it.name;
+      const sub = document.createElement("div");
+      sub.className = "sub";
+      const label = KIND_LABEL[it.kind] || "สถานที่";
+      sub.textContent = [label, it.province, it.alt].filter(Boolean).join(" · ");
+      li.append(name, sub);
+      li.addEventListener("mousedown", e => { e.preventDefault(); select(it); });
+      list.appendChild(li);
+    });
+  }
+
+  function select(it) {
+    const zoom = KIND_ZOOM[it.kind] ?? (it.kind.startsWith("place:") ? 15 : 17);
+    map.flyTo({ center: [it.lon, it.lat], zoom });
+    if (marker) marker.remove();
+    marker = new maplibregl.Marker({ color: "#d9534f" })
+      .setLngLat([it.lon, it.lat])
+      .setPopup(new maplibregl.Popup({ offset: 25 }).setText(it.province ? `${it.name} (${it.province})` : it.name))
+      .addTo(map);
+    marker.togglePopup();
+    input.value = it.name;
+    list.innerHTML = "";
+    input.blur();
+  }
+
+  input.addEventListener("focus", () => {
+    loadIndex().catch(() => message("โหลด search-index.json ไม่ได้"));
+    if (index && input.value.trim()) render();   // กลับมาโฟกัสอีกครั้งให้เห็นผลลัพธ์เดิม
+  });
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      if (!input.value.trim()) { shown = []; list.innerHTML = ""; return; }
+      if (!index) {
+        message("กำลังโหลดข้อมูลค้นหา…");
+        try { await loadIndex(); } catch { return message("โหลด search-index.json ไม่ได้"); }
+      }
+      shown = search(input.value);
+      active = shown.length ? 0 : -1;
+      render();
+    }, 150);
+  });
+  input.addEventListener("keydown", e => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!shown.length) return;
+      e.preventDefault();
+      active = (active + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
+      render();
+      list.children[active].scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter" && shown[active]) {
+      select(shown[active]);
+    } else if (e.key === "Escape") {
+      list.innerHTML = "";
+      input.blur();
+    }
+  });
+  input.addEventListener("blur", () => setTimeout(() => { list.innerHTML = ""; }, 100));
+</script>
+</body>
+</html>
